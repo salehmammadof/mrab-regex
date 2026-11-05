@@ -2,7 +2,7 @@ name: Fuzz regex (continuous)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # Hər 6 saatdan bir
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,18 +14,16 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Fetch previous progress
         run: |
-          git fetch origin fuzz-data:fuzz-data 2>/dev/null || true
-          if git show-ref --verify --quiet refs/heads/fuzz-data; then
-            git worktree add /tmp/fuzz-data fuzz-data
-            mkdir -p corpus artifacts
-            cp -r /tmp/fuzz-data/corpus/* corpus/ 2>/dev/null || true
-            cp -r /tmp/fuzz-data/artifacts/* artifacts/ 2>/dev/null || true
-            [ -f /tmp/fuzz-data/redos_log.jsonl ] && cp /tmp/fuzz-data/redos_log.jsonl . || true
-          else
-            mkdir -p corpus artifacts
+          mkdir -p corpus artifacts
+          if git ls-remote --exit-code --heads origin fuzz-data; then
+            git fetch origin fuzz-data
+            git checkout origin/fuzz-data -- corpus/ artifacts/ redos_log.jsonl 2>/dev/null || true
+            git checkout ${{ github.sha }} -- .github/
           fi
 
       - name: Install clang
@@ -53,21 +51,27 @@ jobs:
                 >> fuzz.log 2>&1
               sleep 1
             done
-          '
+          ' || true
 
       - name: Save progress back to fuzz-data branch
         if: always()
         run: |
           git config user.name "fuzz-bot"
           git config user.email "fuzz-bot@users.noreply.github.com"
-          rm -rf /tmp/push && mkdir /tmp/push && cd /tmp/push
-          git init -q
-          git checkout -q -b fuzz-data
-          cp -r $GITHUB_WORKSPACE/corpus . 2>/dev/null || mkdir corpus
-          cp -r $GITHUB_WORKSPACE/artifacts . 2>/dev/null || mkdir artifacts
-          cp $GITHUB_WORKSPACE/redos_log.jsonl . 2>/dev/null || true
-          cp $GITHUB_WORKSPACE/fuzz.log . 2>/dev/null || true
+          
+          WORKDIR=$(mktemp -d)
+          cd $WORKDIR
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git repo
+          cd repo
+          
+          git checkout --orphan fuzz-data 2>/dev/null || git checkout fuzz-data
+          git rm -rf . 2>/dev/null || true
+          
+          [ -d $GITHUB_WORKSPACE/corpus ] && cp -r $GITHUB_WORKSPACE/corpus . || mkdir corpus
+          [ -d $GITHUB_WORKSPACE/artifacts ] && cp -r $GITHUB_WORKSPACE/artifacts . || mkdir artifacts
+          [ -f $GITHUB_WORKSPACE/redos_log.jsonl ] && cp $GITHUB_WORKSPACE/redos_log.jsonl . || true
+          [ -f $GITHUB_WORKSPACE/fuzz.log ] && cp $GITHUB_WORKSPACE/fuzz.log . || true
+          
           git add -A
-          git commit -q -m "fuzz progress $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
-          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git push -f origin fuzz-data
+          git commit -m "fuzz progress $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
+          git push origin fuzz-data --force
