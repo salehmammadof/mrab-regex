@@ -1,6 +1,12 @@
-name: Fuzz regex
+name: Fuzz regex (continuous)
+
 on:
+  schedule:
+    - cron: '0 */6 * * *'   # Hər 6 saatdan bir
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   fuzz:
@@ -8,27 +14,39 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Fetch previous progress
+        run: |
+          git fetch origin fuzz-data:fuzz-data 2>/dev/null || true
+          if git show-ref --verify --quiet refs/heads/fuzz-data; then
+            git worktree add /tmp/fuzz-data fuzz-data
+            mkdir -p corpus artifacts
+            cp -r /tmp/fuzz-data/corpus/* corpus/ 2>/dev/null || true
+            cp -r /tmp/fuzz-data/artifacts/* artifacts/ 2>/dev/null || true
+            [ -f /tmp/fuzz-data/redos_log.jsonl ] && cp /tmp/fuzz-data/redos_log.jsonl . || true
+          else
+            mkdir -p corpus artifacts
+          fi
+
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
-        
+
       - name: Install atheris
         run: pip install atheris
-        
+
       - name: Build regex with ASan
         run: |
           CC=clang CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
           LDSHARED="clang -shared -fsanitize=address" \
           pip install -e . --no-build-isolation
-          
+
       - name: Run fuzz campaign
         continue-on-error: true
         run: |
           export ASAN_OPTIONS=detect_leaks=0
           export REGEX_MODE=match
           PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)
-          mkdir -p corpus artifacts
-          timeout 20000 bash -c '
+          timeout 19800 bash -c '
             while true; do
               LD_PRELOAD="'"$PRELOAD"'" python fuzz_regex.py corpus/ \
                 -max_len=256 -timeout=20 -artifact_prefix=./artifacts/ \
@@ -36,13 +54,20 @@ jobs:
               sleep 1
             done
           '
-          
-      - name: Upload findings
+
+      - name: Save progress back to fuzz-data branch
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-results
-          path: |
-            artifacts/
-            redos_log.jsonl
-            fuzz.log
+        run: |
+          git config user.name "fuzz-bot"
+          git config user.email "fuzz-bot@users.noreply.github.com"
+          rm -rf /tmp/push && mkdir /tmp/push && cd /tmp/push
+          git init -q
+          git checkout -q -b fuzz-data
+          cp -r $GITHUB_WORKSPACE/corpus . 2>/dev/null || mkdir corpus
+          cp -r $GITHUB_WORKSPACE/artifacts . 2>/dev/null || mkdir artifacts
+          cp $GITHUB_WORKSPACE/redos_log.jsonl . 2>/dev/null || true
+          cp $GITHUB_WORKSPACE/fuzz.log . 2>/dev/null || true
+          git add -A
+          git commit -q -m "fuzz progress $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push -f origin fuzz-data
