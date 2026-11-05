@@ -20,23 +20,22 @@ jobs:
       - name: Fetch previous progress
         run: |
           mkdir -p corpus artifacts
-          if git ls-remote --exit-code --heads origin fuzz-data; then
-            git fetch origin fuzz-data
-            git checkout origin/fuzz-data -- corpus/ artifacts/ redos_log.jsonl 2>/dev/null || true
-            git checkout ${{ github.sha }} -- .github/
+          git fetch origin fuzz-data:refs/remotes/origin/fuzz-data 2>/dev/null || true
+          if git rev-parse --verify origin/fuzz-data >/dev/null 2>&1; then
+            git checkout origin/fuzz-data -- corpus artifacts redos_log.jsonl 2>/dev/null || true
+            git reset HEAD . 2>/dev/null || true
           fi
 
-      - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - name: Install atheris
-        run: pip install atheris
+      - name: Install clang and build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang
+          pip install --upgrade pip setuptools wheel atheris
 
       - name: Build regex with ASan
         run: |
           CC=clang CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
           LDSHARED="clang -shared -fsanitize=address" \
-          pip install -e . --no-build-isolation
+          python setup.py build_ext --inplace
 
       - name: Run fuzz campaign
         continue-on-error: true
@@ -55,23 +54,24 @@ jobs:
 
       - name: Save progress back to fuzz-data branch
         if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "fuzz-bot"
           git config user.email "fuzz-bot@users.noreply.github.com"
           
-          WORKDIR=$(mktemp -d)
-          cd $WORKDIR
-          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git repo
-          cd repo
-          
-          git checkout --orphan fuzz-data 2>/dev/null || git checkout fuzz-data
+          mkdir -p /tmp/fuzz_export
+          [ -d corpus ] && cp -r corpus /tmp/fuzz_export/ 2>/dev/null || true
+          [ -d artifacts ] && cp -r artifacts /tmp/fuzz_export/ 2>/dev/null || true
+          [ -f redos_log.jsonl ] && cp redos_log.jsonl /tmp/fuzz_export/ 2>/dev/null || true
+          [ -f fuzz.log ] && cp fuzz.log /tmp/fuzz_export/ 2>/dev/null || true
+
+          git fetch origin fuzz-data:fuzz-data 2>/dev/null || git checkout --orphan fuzz-data
+          git checkout fuzz-data
           git rm -rf . 2>/dev/null || true
           
-          [ -d $GITHUB_WORKSPACE/corpus ] && cp -r $GITHUB_WORKSPACE/corpus . || mkdir corpus
-          [ -d $GITHUB_WORKSPACE/artifacts ] && cp -r $GITHUB_WORKSPACE/artifacts . || mkdir artifacts
-          [ -f $GITHUB_WORKSPACE/redos_log.jsonl ] && cp $GITHUB_WORKSPACE/redos_log.jsonl . || true
-          [ -f $GITHUB_WORKSPACE/fuzz.log ] && cp $GITHUB_WORKSPACE/fuzz.log . || true
+          cp -r /tmp/fuzz_export/* . 2>/dev/null || true
           
           git add -A
           git commit -m "fuzz progress $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
-          git push origin fuzz-data --force
+          git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git fuzz-data --force
